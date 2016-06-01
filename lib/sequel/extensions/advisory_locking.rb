@@ -16,30 +16,35 @@ module Sequel
     POSTGRES_SIGNED_BIGINT_MINIMUM = -POSTGRES_SIGNED_BIGINT_BOUND
     POSTGRES_SIGNED_BIGINT_RANGE = (POSTGRES_SIGNED_BIGINT_MINIMUM..POSTGRES_SIGNED_BIGINT_MAXIMUM).freeze
 
-    LOCK_SQL     = "SELECT pg_advisory_lock(?) -- ?".freeze
-    TRY_LOCK_SQL = "SELECT pg_try_advisory_lock(?) -- ?".freeze
-    UNLOCK_SQL   = "SELECT pg_advisory_unlock(?) -- ?".freeze
-
-    def advisory_lock(key, try: false, &block)
+    def advisory_lock(key, try: false, shared: false, &block)
       int = advisory_lock_key(key)
 
       synchronize do
         begin
           # Add key to the end so that logs read easier.
-          sql = try ? TRY_LOCK_SQL : LOCK_SQL
+          sql = "SELECT pg#{'_try' if try}_advisory_lock#{'_shared' if shared}(?) -- ?"
           locked = !!self[sql, int, key].get
 
           if locked && block
             if in_transaction?
+              # If we're in a transaction and an error occurs at the DB level,
+              # the advisory lock won't be released for us and we won't be
+              # able to run the unlock function below. So, wrap the block in a
+              # savepoint that will hopefully be transparent to the caller.
               transaction(savepoint: true, rollback: :reraise, &block)
             else
+              # If we're not in a transaction, of course, we don't have that
+              # worry, and we don't want to force the caller to enter a
+              # transaction that they maybe don't want to incur the overhead
+              # of, so just yield.
               yield
             end
           else
             locked
           end
         ensure
-          self[UNLOCK_SQL, int, key].get if locked
+          sql = "SELECT pg_advisory_unlock#{'_shared' if shared}(?) -- ?"
+          self[sql, int, key].get if locked
         end
       end
     end

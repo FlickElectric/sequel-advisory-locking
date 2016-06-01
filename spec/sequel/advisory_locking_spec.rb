@@ -48,9 +48,24 @@ class AdvisoryLockingSpec < Minitest::Spec
       val = DB.advisory_lock 'key' do
         assert_sqls ["SELECT pg_advisory_lock(4354430579665871434) -- 'key'"]
         assert_equal [4354430579665871434], locked_ids
+        clear_sqls
         'blah'
       end
 
+      assert_sqls ["SELECT pg_advisory_unlock(4354430579665871434) -- 'key'"]
+      assert_equal 'blah', val
+      assert_empty advisory_locks
+    end
+
+    it "with the :shared option should use the appropriate lock" do
+      val = DB.advisory_lock 'key', shared: true do
+        assert_sqls ["SELECT pg_advisory_lock_shared(4354430579665871434) -- 'key'"]
+        assert_equal [4354430579665871434], locked_ids
+        clear_sqls
+        'blah'
+      end
+
+      assert_sqls ["SELECT pg_advisory_unlock_shared(4354430579665871434) -- 'key'"]
       assert_equal 'blah', val
       assert_empty advisory_locks
     end
@@ -65,6 +80,19 @@ class AdvisoryLockingSpec < Minitest::Spec
         end
 
         assert_sqls ["SELECT pg_advisory_unlock(4354430579665871434) -- 'key'"]
+        assert_equal 'blah', val
+        assert_empty advisory_locks
+      end
+
+      it "with the :shared option should use the appropriate lock" do
+        val = DB.advisory_lock 'key', try: true, shared: true do
+          assert_sqls ["SELECT pg_try_advisory_lock_shared(4354430579665871434) -- 'key'"]
+          assert_equal [4354430579665871434], locked_ids
+          clear_sqls
+          'blah'
+        end
+
+        assert_sqls ["SELECT pg_advisory_unlock_shared(4354430579665871434) -- 'key'"]
         assert_equal 'blah', val
         assert_empty advisory_locks
       end
