@@ -16,7 +16,7 @@ module Sequel
     TRY_LOCK_SQL = "SELECT pg_try_advisory_lock(?) -- ?".freeze
     UNLOCK_SQL   = "SELECT pg_advisory_unlock(?) -- ?".freeze
 
-    def advisory_lock(key, try: false)
+    def advisory_lock(key, try: false, &block)
       int = case key
             when Integer then key
             when String, Symbol
@@ -36,8 +36,12 @@ module Sequel
           sql = try ? TRY_LOCK_SQL : LOCK_SQL
           locked = !!self[sql, int, key].get
 
-          if locked && block_given?
-            yield
+          if locked && block
+            if in_transaction?
+              transaction(savepoint: true, rollback: :reraise, &block)
+            else
+              yield
+            end
           else
             locked
           end
@@ -48,5 +52,5 @@ module Sequel
     end
   end
 
-  Database.register_extension(:advisory_locking){|db| db.extend(Sequel::AdvisoryLocking)}
+  Database.register_extension(:advisory_locking) { |db| db.extend(Sequel::AdvisoryLocking) }
 end
