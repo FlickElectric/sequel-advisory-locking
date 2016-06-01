@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'securerandom'
 
 class AdvisoryLockingSpec < Minitest::Spec
   def advisory_locks
@@ -40,12 +41,6 @@ class AdvisoryLockingSpec < Minitest::Spec
 
   after do
     assert_empty advisory_locks
-  end
-
-  it "should raise an error if passed a bad key" do
-    error = assert_raises(Sequel::AdvisoryLocking::Error){DB.advisory_lock(Object.new)}
-    assert_equal "passed an invalid key type (Object)", error.message
-    assert_sqls []
   end
 
   describe "with a block" do
@@ -230,6 +225,44 @@ class AdvisoryLockingSpec < Minitest::Spec
           "SELECT 1 AS \"one\" FROM \"pg_locks\" WHERE (\"locktype\" = 'advisory') LIMIT 1",
           "COMMIT"
         ]
+      end
+    end
+  end
+
+  describe "lock key derivation" do
+    it "for an unparseable obejct should raise an error" do
+      error = assert_raises(Sequel::AdvisoryLocking::Error){DB.advisory_lock_key(Object.new)}
+      assert_equal "passed an invalid key type (Object)", error.message
+      assert_sqls []
+    end
+
+    it "for an integer should just return that integer" do
+      [90, 0, -67, -9223372036854775808, 9223372036854775807].each do |int|
+        assert_equal int, DB.advisory_lock_key(int)
+      end
+    end
+
+    it "for an integer that's too big or too small for Postgres' bigint should return an error" do
+      [-9223372036854775809, 9223372036854775808].each do |int|
+        error = assert_raises(Sequel::AdvisoryLocking::Error) { DB.advisory_lock_key(int) }
+        assert_equal "given advisory lock integer (#{int}) falls outside Postgres' bigint range", error.message
+      end
+    end
+
+    it "for a string should pseudorandomly return an integer within the valid range" do
+      assert_equal  4354430579665871434, DB.advisory_lock_key('key')
+      assert_equal   919145239626757800, DB.advisory_lock_key('a')
+      assert_equal -7860083176248561684, DB.advisory_lock_key('b')
+      assert_equal  5371115335115585335, DB.advisory_lock_key('c')
+
+      100.times do
+        s = SecureRandom.uuid
+        result = DB.advisory_lock_key(s)
+        assert_kind_of Integer, result
+        assert result <= ((2**63) - 1)
+        assert result >= (-(2**63))
+
+        assert_equal result, DB["SELECT ('x' || substring(md5(?) from 1 for 16))::bit(64)::bigint", s].get
       end
     end
   end
