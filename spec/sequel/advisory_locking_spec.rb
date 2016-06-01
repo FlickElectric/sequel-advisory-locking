@@ -55,21 +55,38 @@ class AdvisoryLockingSpec < Minitest::Spec
       assert_empty advisory_locks
     end
 
-    it "should release the lock successfully if a Ruby error is thrown inside the block" do
-      error = assert_raises { DB.advisory_lock('key') { raise "Blah" } }
-      assert_equal "Blah", error.message
-      assert_sqls [
-        "SELECT pg_advisory_lock(4354430579665871434) -- 'key'",
-        "SELECT pg_advisory_unlock(4354430579665871434) -- 'key'",
-      ]
-    end
-
-    it "should release the lock successfully if a DB error is thrown inside the block"
-
     describe "with the :try option" do
-      it "should lock the integer derived from the key for the duration of the block and return the result of the block"
+      it "should lock the integer derived from the key for the duration of the block and return the result of the block" do
+        val = DB.advisory_lock 'key', try: true do
+          assert_sqls ["SELECT pg_try_advisory_lock(4354430579665871434) -- 'key'"]
+          assert_equal [4354430579665871434], locked_ids
+          clear_sqls
+          'blah'
+        end
 
-      it "with a block should not run the block if the lock isn't available and return false"
+        assert_sqls ["SELECT pg_advisory_unlock(4354430579665871434) -- 'key'"]
+        assert_equal 'blah', val
+        assert_empty advisory_locks
+      end
+
+      it "with a block should not run the block if the lock isn't available and return false" do
+        q = Queue.new
+        t = Thread.new do
+          DB.get(1)
+          clear_sqls
+          q.pop
+          assert_equal false, DB.advisory_lock('key', try: true) { raise "Should not get here!" }
+          assert_sqls ["SELECT pg_try_advisory_lock(4354430579665871434) -- 'key'"]
+        end
+
+        DB.advisory_lock('key') do
+          assert_sqls ["SELECT pg_advisory_lock(4354430579665871434) -- 'key'"]
+          q.push nil
+          t.join
+        end
+
+        assert_sqls ["SELECT pg_advisory_unlock(4354430579665871434) -- 'key'"]
+      end
     end
   end
 
@@ -82,7 +99,21 @@ class AdvisoryLockingSpec < Minitest::Spec
       ]
     end
 
-    it "should still block if the lock isn't available"
+    it "should still block if the lock isn't available" do
+      q = Queue.new
+
+      t = Thread.new do
+        q.pop
+        assert_equal true, DB.advisory_lock('key')
+      end
+
+      DB.advisory_lock('key') do
+        q.push nil
+        sleep_until { t.status == 'sleep' }
+      end
+
+      t.join
+    end
 
     describe "with the :try option" do
       it "should return true or false depending on whether the lock was available" do
@@ -168,8 +199,35 @@ class AdvisoryLockingSpec < Minitest::Spec
   end
 
   describe "when an error is raised" do
+    describe "a general Ruby error" do
+      it "should release the lock successfully if thrown inside the block" do
+        error = assert_raises(RuntimeError) { DB.advisory_lock('key') { raise "Blah" } }
+        assert_equal "Blah", error.message
+        assert_sqls [
+          "SELECT pg_advisory_lock(4354430579665871434) -- 'key'",
+          "SELECT pg_advisory_unlock(4354430579665871434) -- 'key'",
+        ]
+      end
+    end
+
     describe "Sequel::Rollback" do
-      it "should be reraised"
+      it "should be reraised, inside or outside a transaction" do
+        assert_raises(Sequel::Rollback) { DB.advisory_lock('key') { raise Sequel::Rollback } }
+        assert_sqls [
+          "SELECT pg_advisory_lock(4354430579665871434) -- 'key'",
+          "SELECT pg_advisory_unlock(4354430579665871434) -- 'key'",
+        ]
+
+        DB.transaction { DB.advisory_lock('key') { raise Sequel::Rollback } }
+        assert_sqls [
+          "BEGIN",
+          "SELECT pg_advisory_lock(4354430579665871434) -- 'key'",
+          "SAVEPOINT autopoint_1",
+          "ROLLBACK TO SAVEPOINT autopoint_1",
+          "SELECT pg_advisory_unlock(4354430579665871434) -- 'key'",
+          "ROLLBACK"
+        ]
+      end
     end
 
     describe "DB errors inside a transaction" do
